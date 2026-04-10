@@ -788,7 +788,16 @@ display:
   # When enabled, a dim box shows the model's thought process above the response.
   # Toggle at runtime with /reasoning show or /reasoning hide.
   show_reasoning: false
-
+  
+  # Activity Feed — Claude Code style real-time tool call display.
+  # Shows a live feed of tool calls with start/complete status, timestamps, and result previews.
+  # Similar to Claude Code's activity display.
+  activity_feed: false
+  
+  # Reasoning Display — Collapsible panel for model thinking content.
+  # Shows reasoning in a styled box with auto-collapse for short reasoning.
+  reasoning_display: false
+  
   # Stream tokens to the terminal as they arrive instead of waiting for the
   # full response. The response box opens on first token and text appears
   # line-by-line. Tool calls are still captured silently.

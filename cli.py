@@ -1511,6 +1511,10 @@ class HermesCLI:
         self.bell_on_complete = CLI_CONFIG["display"].get("bell_on_complete", False)
         # show_reasoning: display model thinking/reasoning before the response
         self.show_reasoning = CLI_CONFIG["display"].get("show_reasoning", False)
+        # activity_feed: enable Claude Code style real-time activity feed
+        self.enable_activity_feed = CLI_CONFIG["display"].get("activity_feed", False)
+        # reasoning_display: enable collapsible reasoning panel display
+        self.enable_reasoning_display = CLI_CONFIG["display"].get("reasoning_display", False)
         # busy_input_mode: "interrupt" (Enter interrupts current run) or "queue" (Enter queues for next turn)
         _bim = CLI_CONFIG["display"].get("busy_input_mode", "interrupt")
         self.busy_input_mode = "queue" if str(_bim).strip().lower() == "queue" else "interrupt"
@@ -2643,6 +2647,13 @@ class HermesCLI:
                 "credential_pool": getattr(self, "_credential_pool", None),
             }
             effective_model = model_override or self.model
+            
+            # Set environment variables for activity feed and reasoning display
+            if self.enable_activity_feed:
+                os.environ['HERMES_ENABLE_ACTIVITY_FEED'] = 'true'
+            if self.enable_reasoning_display:
+                os.environ['HERMES_ENABLE_REASONING_DISPLAY'] = 'true'
+            
             self.agent = AIAgent(
                 model=effective_model,
                 api_key=runtime.get("api_key"),

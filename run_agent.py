@@ -694,6 +694,13 @@ class AIAgent:
         self._last_activity_desc: str = "initializing"
         self._current_tool: str | None = None
         self._api_call_count: int = 0
+        
+        # Activity Feed & Reasoning Display — Claude Code style visualization
+        # Initialized lazily in run_conversation() when display features are enabled.
+        self._activity_feed = None
+        self._reasoning_display = None
+        self._enable_activity_feed = False
+        self._enable_reasoning_display = False
 
         # Rate limit tracking — updated from x-ratelimit-* response headers
         # after each API call.  Accessed by /usage slash command.
@@ -6464,7 +6471,42 @@ class AIAgent:
                 "tool_call_id": tc.id,
             }
             messages.append(tool_msg)
-
+        
+        # Activity Feed: Log tool call completion
+        if self._enable_activity_feed and self._activity_feed:
+            try:
+                # Determine status based on result
+                status = "completed"
+                try:
+                    result_data = json.loads(function_result)
+                    if isinstance(result_data, dict):
+                        if result_data.get("error"):
+                            status = "failed"
+                        elif result_data.get("success") is False:
+                            status = "failed"
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                
+                # Create result preview
+                result_preview = None
+                if function_result and len(function_result) > 0:
+                    try:
+                        result_data = json.loads(function_result)
+                        if isinstance(result_data, dict):
+                            if "exit_code" in result_data:
+                                result_preview = f"exit {result_data['exit_code']}"
+                            elif "success" in result_data:
+                                result_preview = "success" if result_data["success"] else "failed"
+                    except (json.JSONDecodeError, TypeError):
+                        result_preview = function_result[:50] + "..." if len(function_result) > 50 else function_result
+                
+                self._activity_feed.complete_activity(
+                    status=status,
+                    result_preview=result_preview
+                )
+            except Exception:
+                pass  # Don't let activity feed errors break tool execution
+        
         # ── Per-turn aggregate budget enforcement ─────────────────────────
         num_tools = len(parsed_calls)
         if num_tools > 0:
@@ -6492,6 +6534,19 @@ class AIAgent:
     def _execute_tool_calls_sequential(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
         """Execute tool calls sequentially (original behavior). Used for single calls or interactive tools."""
         for i, tool_call in enumerate(assistant_message.tool_calls, 1):
+            # Activity Feed: Log tool call start
+            if self._enable_activity_feed and self._activity_feed:
+                try:
+                    function_name = tool_call.function.name
+                    function_args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
+                    self._activity_feed.add_activity(
+                        category=function_name,
+                        description=f"Calling {function_name}",
+                        args=function_args,
+                        tool_name=function_name
+                    )
+                except Exception:
+                    pass  # Don't let activity feed errors break tool execution
             # SAFETY: check interrupt BEFORE starting each tool.
             # If the user sent "stop" during a previous tool's execution,
             # do NOT start any more tools -- skip them all immediately.
@@ -7089,6 +7144,32 @@ class AIAgent:
         self._persist_user_message_override = persist_user_message
         # Generate unique task_id if not provided to isolate VMs between concurrent tasks
         effective_task_id = task_id or str(uuid.uuid4())
+        
+        # Initialize Activity Feed and Reasoning Display if enabled
+        # Check for config/env flags to enable visualization features
+        # Note: These features can override quiet_mode when explicitly enabled in config
+        config_activity_feed = os.getenv('HERMES_ENABLE_ACTIVITY_FEED', 'false').lower() == 'true'
+        config_reasoning_display = os.getenv('HERMES_ENABLE_REASONING_DISPLAY', 'false').lower() == 'true'
+        
+        self._enable_activity_feed = (
+            (not self.quiet_mode or config_activity_feed) and 
+            config_activity_feed
+        )
+        self._enable_reasoning_display = (
+            (not self.quiet_mode or config_reasoning_display) and
+            config_reasoning_display
+        )
+        
+        if self._enable_activity_feed:
+            from agent.display import ActivityFeed
+            self._activity_feed = ActivityFeed(print_fn=self._print_fn or print)
+            self._activity_feed.start()
+            self._activity_feed.add_activity("thinking", "Starting conversation", 
+                                            args={"user_message": user_message[:50] + "..." if len(user_message) > 50 else user_message})
+        
+        if self._enable_reasoning_display and self.reasoning_config:
+            from agent.display import ReasoningDisplay
+            self._reasoning_display = ReasoningDisplay(print_fn=self._print_fn or print)
         
         # Reset retry counters and iteration budget at the start of each turn
         # so subagent usage from a previous turn doesn't eat into the next one.

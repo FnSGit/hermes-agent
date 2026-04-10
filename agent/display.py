@@ -1062,3 +1062,330 @@ def format_context_pressure_gateway(
         hint = "Auto-compaction is disabled — context may be truncated."
 
     return f"{icon} Context: {bar} {pct_int}% to compaction\n{hint}"
+
+
+# =========================================================================
+# ActivityFeed — Real-time activity stream (Claude Code style)
+# =========================================================================
+
+class ActivityFeed:
+    """Real-time activity feed for displaying tool calls and agent actions.
+    
+    Similar to Claude Code's activity display, shows:
+    - Tool call start/completion with timestamps
+    - Reasoning/thinking progress
+    - File operations with diff previews
+    - Status updates in a scrollable feed format
+    
+    Usage:
+        feed = ActivityFeed(print_fn=print)
+        feed.start()
+        feed.add_activity("terminal", "running tests", args={"command": "pytest"})
+        feed.complete_activity("terminal", "tests passed", duration=2.5)
+        feed.stop()
+    """
+    
+    # Activity icons by category
+    ICONS = {
+        "thinking": "💭",
+        "reasoning": "🧠",
+        "search": "🔍",
+        "read": "📖",
+        "write": "✍️",
+        "terminal": "💻",
+        "browser": "🌐",
+        "web": "🌍",
+        "skill": "📚",
+        "memory": "🧠",
+        "file": "📁",
+        "code": "⚡",
+        "error": "❌",
+        "success": "✅",
+        "info": "ℹ️",
+    }
+    
+    # Color codes for different activity types
+    COLORS = {
+        "thinking": "\033[38;2;150;150;200m",      # Light purple
+        "reasoning": "\033[38;2;180;140;255m",     # Purple
+        "search": "\033[38;2;100;200;255m",        # Light blue
+        "read": "\033[38;2;100;220;180m",          # Teal
+        "write": "\033[38;2;255;200;100m",         # Orange
+        "terminal": "\033[38;2;255;150;150m",      # Red
+        "browser": "\033[38;2;100;180;255m",       # Blue
+        "web": "\033[38;2;120;200;255m",           # Sky blue
+        "skill": "\033[38;2;200;150;255m",         # Lavender
+        "memory": "\033[38;2;255;180;200m",        # Pink
+        "file": "\033[38;2;180;200;150m",          # Olive
+        "code": "\033[38;2;255;220;100m",          # Yellow
+        "error": "\033[38;2;255;100;100m",         # Bright red
+        "success": "\033[38;2;100;255;150m",       # Green
+        "info": "\033[38;2;200;200;200m",          # Gray
+        "default": "\033[38;2;180;180;180m",       # Dim gray
+    }
+    
+    def __init__(self, print_fn=None, prefix: str = "┊", max_history: int = 50):
+        """Initialize the activity feed.
+        
+        Args:
+            print_fn: Function to use for output (default: print)
+            prefix: Line prefix character (default: "┊")
+            max_history: Maximum number of activities to keep in history
+        """
+        self.print_fn = print_fn or print
+        self.prefix = prefix
+        self.max_history = max_history
+        self.activities: list[dict] = []
+        self.start_time: float | None = None
+        self._current_activity: dict | None = None
+        # Cross-platform: check if stdout is a TTY (works on Linux/macOS/Windows)
+        try:
+            self._is_tty: bool = sys.stdout.isatty() if hasattr(sys.stdout, 'isatty') else False
+        except (ValueError, OSError):
+            # Handle closed/invalid stdout (can happen on Windows services)
+            self._is_tty: bool = False
+    
+    def start(self):
+        """Start the activity feed session."""
+        self.start_time = time.time()
+        self.activities = []
+        self._print_header()
+    
+    def stop(self):
+        """Stop the activity feed session."""
+        if self.start_time:
+            duration = time.time() - self.start_time
+            self._print_footer(duration)
+        self.start_time = None
+        self._current_activity = None
+    
+    def _print_header(self):
+        """Print the activity feed header."""
+        self.print_fn(f"\n{self.prefix} ── Activity Feed ────────────────────────────")
+    
+    def _print_footer(self, duration: float):
+        """Print the activity feed footer with summary."""
+        completed = sum(1 for a in self.activities if a.get("status") == "completed")
+        self.print_fn(f"{self.prefix} ── {len(self.activities)} activities, {completed} completed ({duration:.1f}s) ──────\n")
+    
+    def _get_icon(self, category: str) -> str:
+        """Get the icon for an activity category."""
+        return self.ICONS.get(category, self.ICONS["info"])
+    
+    def _get_color(self, category: str) -> str:
+        """Get the ANSI color code for an activity category."""
+        return self.COLORS.get(category, self.COLORS["default"])
+    
+    def _format_time(self, elapsed: float) -> str:
+        """Format elapsed time as compact string."""
+        if elapsed < 1:
+            return f"{elapsed*1000:.0f}ms"
+        elif elapsed < 60:
+            return f"{elapsed:.1f}s"
+        else:
+            mins = int(elapsed // 60)
+            secs = elapsed % 60
+            return f"{mins}m{secs:.0f}s"
+    
+    def add_activity(self, category: str, description: str, args: dict = None, 
+                     tool_name: str = None) -> str:
+        """Add a new activity to the feed (start state).
+        
+        Args:
+            category: Activity category (e.g., "terminal", "read", "write")
+            description: Human-readable description
+            args: Optional arguments dict for preview
+            tool_name: Optional tool name for icon resolution
+        
+        Returns:
+            Activity ID for later completion
+        """
+        activity_id = f"{category}_{len(self.activities)}"
+        timestamp = time.time()
+        elapsed = timestamp - self.start_time if self.start_time else 0
+        
+        activity = {
+            "id": activity_id,
+            "category": category,
+            "description": description,
+            "args": args or {},
+            "tool_name": tool_name or category,
+            "status": "running",
+            "start_time": timestamp,
+            "elapsed": elapsed,
+            "duration": None,
+        }
+        
+        self.activities.append(activity)
+        self._current_activity = activity
+        
+        # Trim history if needed
+        if len(self.activities) > self.max_history:
+            self.activities = self.activities[-self.max_history:]
+        
+        self._print_activity_start(activity)
+        return activity_id
+    
+    def complete_activity(self, activity_id: str = None, status: str = "completed",
+                          result_preview: str = None, duration: float = None):
+        """Mark an activity as completed.
+        
+        Args:
+            activity_id: ID of activity to complete (None for current)
+            status: Final status ("completed", "failed", "cancelled")
+            result_preview: Optional preview of the result
+            duration: Optional duration override
+        """
+        if activity_id is None:
+            activity = self._current_activity
+        else:
+            activity = next((a for a in self.activities if a["id"] == activity_id), None)
+        
+        if not activity:
+            return
+        
+        activity["status"] = status
+        activity["end_time"] = time.time()
+        activity["duration"] = duration or (activity["end_time"] - activity["start_time"])
+        if result_preview:
+            activity["result_preview"] = result_preview
+        
+        self._print_activity_complete(activity)
+    
+    def _print_activity_start(self, activity: dict):
+        """Print the start of an activity."""
+        icon = self._get_icon(activity["category"])
+        color = self._get_color(activity["category"])
+        desc = activity["description"]
+        
+        # Build args preview
+        args_preview = ""
+        if activity["args"]:
+            preview = build_tool_preview(activity["tool_name"], activity["args"])
+            if preview:
+                args_preview = f" {color}→ {preview}{_ANSI_RESET}"
+        
+        time_str = self._format_time(activity["elapsed"])
+        
+        self.print_fn(f"{self.prefix} {color}{icon} {desc}{args_preview}{_ANSI_RESET} {color}[{time_str}]{_ANSI_RESET}")
+    
+    def _print_activity_complete(self, activity: dict):
+        """Print the completion of an activity."""
+        icon = self._get_icon(activity["status"])
+        color = self._get_color(activity["status"])
+        desc = activity["description"]
+        duration = self._format_time(activity["duration"] or 0)
+        
+        result_preview = ""
+        if activity.get("result_preview"):
+            result_preview = f": {activity['result_preview'][:50]}"
+        
+        self.print_fn(f"{self.prefix}   {color}{icon} {desc} ({duration}){result_preview}{_ANSI_RESET}")
+    
+    def update_status(self, message: str):
+        """Update the current activity status message."""
+        if self._current_activity:
+            self._current_activity["description"] = message
+            self._print_activity_start(self._current_activity)
+    
+    def log_message(self, message: str, level: str = "info"):
+        """Log a message to the activity feed."""
+        icon = self._get_icon(level)
+        color = self._get_color(level)
+        self.print_fn(f"{self.prefix} {color}{icon} {message}{_ANSI_RESET}")
+
+
+# =========================================================================
+# ReasoningDisplay — Collapsible reasoning panel
+# =========================================================================
+
+class ReasoningDisplay:
+    """Display model reasoning in a collapsible panel format.
+    
+    Shows thinking/reasoning content before the final response,
+    similar to Claude Code's thinking panel.
+    """
+    
+    # Box drawing characters
+    BOX_TOP_LEFT = "╔"
+    BOX_TOP_RIGHT = "╗"
+    BOX_BOTTOM_LEFT = "╚"
+    BOX_BOTTOM_RIGHT = "╝"
+    BOX_HORIZONTAL = "═"
+    BOX_VERTICAL = "║"
+    BOX_T_RIGHT = "╠"
+    BOX_T_LEFT = "╣"
+    BOX_CROSS = "╬"
+    
+    def __init__(self, print_fn=None, max_lines: int = 30, 
+                 collapse_threshold: int = 10):
+        """Initialize the reasoning display.
+        
+        Args:
+            print_fn: Function to use for output
+            max_lines: Maximum lines to show before truncating
+            collapse_threshold: Collapse if reasoning is shorter than this
+        """
+        self.print_fn = print_fn or print
+        self.max_lines = max_lines
+        self.collapse_threshold = collapse_threshold
+    
+    def display(self, reasoning_text: str, title: str = "思考过程"):
+        """Display reasoning content in a panel.
+        
+        Args:
+            reasoning_text: The reasoning/thinking content
+            title: Panel title
+        """
+        if not reasoning_text or not reasoning_text.strip():
+            return
+        
+        lines = reasoning_text.split('\n')
+        
+        # Auto-collapse for short reasoning
+        if len(lines) <= self.collapse_threshold:
+            self._print_compact(lines, title)
+        else:
+            self._print_expanded(lines, title)
+    
+    def _print_compact(self, lines: list, title: str):
+        """Print reasoning in compact inline format."""
+        _DIM = "\033[38;2;150;150;150m"
+        _ITALIC = "\033[3m"
+        _RESET = "\033[0m"
+        
+        text = ' '.join(line.strip() for line in lines)[:200]
+        self.print_fn(f"{_DIM}{_ITALIC}💭 {title}: {text}...{_RESET}\n")
+    
+    def _print_expanded(self, lines: list, title: str):
+        """Print reasoning in an expanded box panel."""
+        _DIM = "\033[38;2;150;150;150m"
+        _BORDER = "\033[38;2;100;100;150m"
+        _TITLE = "\033[38;2;180;160;255m"
+        _ITALIC = "\033[3m"
+        _RESET = "\033[0m"
+        
+        width = 60
+        inner_width = width - 4  # Account for borders
+        
+        # Header
+        self.print_fn(f"{_BORDER}{self.BOX_TOP_LEFT}{self.BOX_HORIZONTAL * (width - 2)}{self.BOX_TOP_RIGHT}{_RESET}")
+        self.print_fn(f"{_BORDER}{self.BOX_VERTICAL}{_RESET} {_TITLE}💭 {title}{_RESET}{' ' * (inner_width - len(title) - 3)}{_BORDER}{self.BOX_VERTICAL}{_RESET}")
+        self.print_fn(f"{_BORDER}{self.BOX_T_RIGHT}{self.BOX_HORIZONTAL * (width - 2)}{self.BOX_T_LEFT}{_RESET}")
+        
+        # Content (truncated if needed)
+        display_lines = lines[:self.max_lines]
+        for line in display_lines:
+            # Truncate long lines
+            if len(line) > inner_width - 1:
+                line = line[:inner_width - 4] + "..."
+            self.print_fn(f"{_BORDER}{self.BOX_VERTICAL}{_RESET} {_DIM}{line}{_RESET}{' ' * max(0, inner_width - len(line) - 1)}{_BORDER}{self.BOX_VERTICAL}{_RESET}")
+        
+        # Truncation indicator
+        if len(lines) > self.max_lines:
+            remaining = len(lines) - self.max_lines
+            trunc_msg = f"... ({remaining} more lines)"
+            self.print_fn(f"{_BORDER}{self.BOX_VERTICAL}{_RESET} {_DIM}{trunc_msg:^{inner_width}}{_RESET} {_BORDER}{self.BOX_VERTICAL}{_RESET}")
+        
+        # Footer
+        self.print_fn(f"{_BORDER}{self.BOX_BOTTOM_LEFT}{self.BOX_HORIZONTAL * (width - 2)}{self.BOX_BOTTOM_RIGHT}{_RESET}\n")
